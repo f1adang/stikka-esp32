@@ -34,6 +34,12 @@ static bool printerClaimed = false;
 static usb_transfer_t* printerOut = nullptr;
 static volatile bool transferDone = false;
 static volatile bool transferOk = false;
+static volatile int transferStatus = 0;  // usb_transfer_status_t of the last completed transfer
+// True from a successful submit until its completion callback fires. Normally
+// only ever true inside usbHostTargetSend(), but a job that gives up on a
+// transfer the endpoint reset couldn't reclaim leaves it set -- the next job
+// has to get that transfer back before it can reuse printerOut.
+static bool transferInFlight = false;
 
 // Interface number currently claimed via usb_host_interface_claim() (primary
 // printer-class path or the fallback path below) -- needed by DEV_GONE
@@ -72,7 +78,9 @@ static void printerTransferCb(usb_transfer_t* transfer) {
   if (transfer->device_handle != deviceHandle) return;
   const bool isIn = transfer->bEndpointAddress & USB_B_ENDPOINT_ADDRESS_EP_DIR_MASK;
   if (isIn) return;  // this firmware doesn't read the printer's status back
-  transferOk = (transfer->status == 0);
+  transferInFlight = false;
+  transferStatus = (int)transfer->status;
+  transferOk = (transfer->status == USB_TRANSFER_STATUS_COMPLETED);
   transferDone = true;
 }
 
@@ -214,6 +222,7 @@ static void clientEventCallback(const usb_host_client_event_msg_t* eventMsg, voi
       usb_host_transfer_free(printerOut);
       printerOut = nullptr;
     }
+    transferInFlight = false;
     if (deviceHandle != nullptr) {
       // The client contract (usb_host_device_close()'s doc comment) requires
       // releasing any claimed interface before closing the device -- skip
@@ -279,17 +288,24 @@ void usbHostTargetLoop() {
   usb_host_client_handle_events(clientHandle, 0);
 }
 
-// Blocks (pumping USB events) until the in-flight transfer completes or
-// times out. Per the USB host library's own contract: never resubmit or
-// modify a transfer before its prior completion callback has fired.
-static bool waitForTransfer(unsigned long timeoutMs) {
+// Blocks (pumping USB events) until the in-flight transfer's completion
+// callback fires or the timeout elapses. Returns whether the callback fired;
+// transferOk says whether it succeeded. Per the USB host library's own
+// contract: never resubmit or modify a transfer before its prior completion
+// callback has fired.
+static bool waitForTransferDone(unsigned long timeoutMs) {
   const unsigned long start = millis();
   while (!transferDone) {
     usbHostTargetLoop();
     if (millis() - start > timeoutMs) return false;
   }
-  return transferOk;
+  return true;
 }
+
+// How long one bulk chunk may sit NAKed before it's treated as stuck. A
+// printer that's mid-feed or mid-cut legitimately NAKs for a while, so this
+// is deliberately generous.
+static const unsigned long USB_CHUNK_TIMEOUT_MS = 5000;
 
 // Recovers the bulk OUT endpoint after a submit failure or a stalled/timed-out
 // transfer, so usbHostTargetSend() can retry instead of failing the whole job
@@ -302,11 +318,24 @@ static bool waitForTransfer(unsigned long timeoutMs) {
 static void resetUsbEndpoint() {
   if (deviceHandle == nullptr || printerOut == nullptr) return;
   const uint8_t ep = printerOut->bEndpointAddress;
-  usb_host_endpoint_halt(deviceHandle, ep);
-  usb_host_endpoint_flush(deviceHandle, ep);
+  const esp_err_t haltErr = usb_host_endpoint_halt(deviceHandle, ep);
+  const esp_err_t flushErr = usb_host_endpoint_flush(deviceHandle, ep);
+  // Pump events before clearing: per usb_host.h, clearing a halt resumes any
+  // transfer still queued on the endpoint, so the flushed transfer must have
+  // been handed back first or the clear just restarts the stuck transfer.
+  for (int i = 0; i < 20 && !transferDone; i++) {
+    usbHostTargetLoop();
+    delay(5);
+  }
   const esp_err_t clearErr = usb_host_endpoint_clear(deviceHandle, ep);
-  dbgPrint("[target] usb_host: endpoint reset after transfer error, clear result: ");
-  dbgPrintln(clearErr, LogLevel::LOG_WARN);
+  dbgPrint("[target] usb_host: endpoint reset after transfer error, halt/flush/clear: 0x");
+  dbgPrint(String(haltErr, HEX));
+  dbgPrint("/0x");
+  dbgPrint(String(flushErr, HEX));
+  dbgPrint("/0x");
+  dbgPrint(String(clearErr, HEX));
+  dbgPrint(", transfer returned: ");
+  dbgPrintln(transferDone ? "yes" : "no", LogLevel::LOG_WARN);
 }
 
 // Called when a send is attempted with no printer currently claimed. Pumps
@@ -386,43 +415,82 @@ bool usbHostTargetSend(const uint8_t* data, size_t len, String& err) {
     }
   }
 
+  if (transferInFlight) {
+    dbgPrintln("[target] usb_host: previous job's transfer still in flight, resetting endpoint", LogLevel::LOG_WARN);
+    if (!waitForTransferDone(500)) {
+      resetUsbEndpoint();
+      if (transferInFlight && !waitForTransferDone(1000)) {
+        err = "previous usb transfer still stuck; power-cycle the printer";
+        return false;
+      }
+    }
+  }
+
   size_t sent = 0;
+  // One retry per chunk: if a chunk fails, reset the endpoint (halt/flush/
+  // clear) and resubmit whatever the device hasn't accepted yet before giving
+  // up on the whole job. Reset to 1 after every successful chunk.
+  int retriesLeft = 1;
   while (sent < len) {
     if (!printerClaimed || printerOut == nullptr) {
       err = "usb printer disconnected mid-transfer";
       return false;
     }
     const size_t chunk = min(len - sent, (size_t)printerOut->data_buffer_size);
-    bool chunkOk = false;
-
-    // One retry: if the first attempt fails, reset the endpoint (halt/flush/
-    // clear) and resubmit the same chunk before giving up on the whole job.
-    for (int attempt = 0; attempt < 2; attempt++) {
-      if (!printerClaimed || printerOut == nullptr) {
-        err = "usb printer disconnected mid-transfer";
-        return false;
-      }
-      if (attempt > 0) {
-        dbgPrintln("[target] usb_host: transfer failed, retrying after endpoint reset", LogLevel::LOG_WARN);
-      }
-      memcpy(printerOut->data_buffer, data + sent, chunk);
-      printerOut->num_bytes = chunk;
-      transferDone = false;
-      transferOk = false;
-      const esp_err_t submitErr = usb_host_transfer_submit(printerOut);
-      if (submitErr != ESP_OK) {
-        err = "usb_host_transfer_submit failed: 0x" + String(submitErr, HEX);
-      } else if (!waitForTransfer(2000)) {
-        err = "usb bulk transfer timed out";
-      } else {
-        chunkOk = true;
-        break;
-      }
-      if (printerClaimed && printerOut != nullptr) resetUsbEndpoint();
+    memcpy(printerOut->data_buffer, data + sent, chunk);
+    printerOut->num_bytes = chunk;
+    transferDone = false;
+    transferOk = false;
+    const esp_err_t submitErr = usb_host_transfer_submit(printerOut);
+    if (submitErr == ESP_OK) transferInFlight = true;
+    if (submitErr == ESP_OK && waitForTransferDone(USB_CHUNK_TIMEOUT_MS) && transferOk) {
+      sent += chunk;
+      retriesLeft = 1;
+      continue;
     }
 
-    if (!chunkOk) return false;
-    sent += chunk;
+    const bool submitted = (submitErr == ESP_OK);
+    if (!submitted) {
+      err = "usb_host_transfer_submit failed: 0x" + String(submitErr, HEX);
+    } else if (!transferDone) {
+      err = "usb bulk transfer timed out (printer not accepting data)";
+    } else {
+      err = "usb bulk transfer failed, status=" + String(transferStatus);
+    }
+    dbgPrint("[target] usb_host: ");
+    dbgPrint(err);
+    dbgPrint(" at byte ");
+    dbgPrint((unsigned long)sent);
+    dbgPrint("/");
+    dbgPrintln((unsigned long)len, LogLevel::LOG_WARN);
+
+    if (!printerClaimed || printerOut == nullptr) {
+      err = "usb printer disconnected mid-transfer";
+      return false;
+    }
+    resetUsbEndpoint();
+
+    if (submitted) {
+      // The flush above hands a stuck transfer back through printerTransferCb,
+      // but only once events are pumped -- until then the library still marks
+      // it in flight and any resubmit fails with ESP_ERR_NOT_FINISHED (0x10c).
+      if (!transferDone && !waitForTransferDone(500)) {
+        err = "usb transfer stuck in flight after endpoint reset";
+        return false;
+      }
+      // Packets the device ACKed before the stall must not be resent: a
+      // duplicated slice of a raster stream corrupts the whole job.
+      const size_t accepted = min((size_t)printerOut->actual_num_bytes, chunk);
+      if (accepted > 0) {
+        dbgPrint("[target] usb_host: device had accepted ");
+        dbgPrint((unsigned long)accepted);
+        dbgPrintln(" bytes of the failed chunk", LogLevel::LOG_WARN);
+      }
+      sent += accepted;
+    }
+
+    if (retriesLeft-- <= 0) return false;
+    dbgPrintln("[target] usb_host: retrying after endpoint reset", LogLevel::LOG_WARN);
   }
   return true;
 }
