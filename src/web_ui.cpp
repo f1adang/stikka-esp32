@@ -406,7 +406,7 @@ static String renderConfigPage() {
 
   if (cfg.printerProtocol == "ql") {
     html += "<div class='box'><h3>Brother QL raster</h3>";
-    html += "<label>Printhead width px (720 = standard family, 1296 = QL-11xx wide)<input name='qlPrintheadPx' value='" + String(cfg.qlPrintheadPx) + "'></label>";
+    html += "<label>Printhead width px (720 = standard family, 1296 = wide: QL-1050/1060N/11xx)<input name='qlPrintheadPx' value='" + String(cfg.qlPrintheadPx) + "'></label>";
     html += "<label>Invalidate bytes (200 = most models, 400 = QL-800/810W/820NWB)<input name='qlInvalidateBytes' value='" + String(cfg.qlInvalidateBytes) + "'></label>";
     html += "<label><input type='checkbox' name='qlAutoCut' ";
     if (cfg.qlAutoCut) html += "checked";
