@@ -102,7 +102,7 @@ struct AppConfig {
   // reading these via the status/capabilities JSON (mqtt_bridge.cpp) instead
   // of a firmware-side rasterizer using them directly. Deliberately generic
   // rather than a specific-model lookup table.
-  int qlPrintheadPx = 720;      // 720 = standard family, 1296 = QL-11xx wide family
+  int qlPrintheadPx = 720;      // 720 = standard family, 1296 = wide family (QL-1050/1060N/11xx)
   int qlInvalidateBytes = 200;  // 200 = most models, 400 = QL-800/810W/820NWB
   bool qlAutoCut = true;
   int qlFeedMarginDots = 35;
