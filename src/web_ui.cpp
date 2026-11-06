@@ -14,6 +14,38 @@
 
 static WebServer web(80);
 
+// HTTP Basic auth (user "admin") once cfg.adminPassword is set. No password
+// set = open, so a fresh device can still be configured.
+static bool isAuthed() {
+  return cfg.adminPassword.isEmpty() || web.authenticate("admin", cfg.adminPassword.c_str());
+}
+
+static WebServer::THandlerFunction guarded(void (*fn)()) {
+  return [fn]() {
+    if (!isAuthed()) {
+      web.requestAuthentication(BASIC_AUTH, "Stikka", "Authentication required");
+      return;
+    }
+    fn();
+  };
+}
+
+static void applyAdminPasswordFields() {
+  if (web.hasArg("clearAdminPassword")) {
+    cfg.adminPassword = "";
+  } else if (!web.arg("adminPassword").isEmpty()) {
+    cfg.adminPassword = web.arg("adminPassword");
+  }
+}
+
+static String adminPasswordFieldHtml() {
+  String html = "<label>Admin password (user: admin)<input type='password' name='adminPassword' autocomplete='new-password' placeholder='";
+  html += cfg.adminPassword.isEmpty() ? "not set -- anyone on the network can change settings" : "leave empty to keep current";
+  html += "'></label>";
+  if (!cfg.adminPassword.isEmpty()) html += "<label><input type='checkbox' name='clearAdminPassword'> Remove password</label>";
+  return html;
+}
+
 static String htmlEscape(const String& in) {
   String out;
   out.reserve(in.length() + 16);
@@ -120,10 +152,10 @@ static String savedWifiNetworksHtml() {
     html += "<div style='display:flex;align-items:center;gap:.4rem;margin-top:.3rem;'>";
     html += "<span style='flex:1;font-size:.85rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;'>" + escaped + "</span>";
     html += "<button type='button' class='savedWifiConnectBtn' data-ssid='" + escaped + "' style='width:auto;margin-top:0;padding:.25rem .6rem;'>Connect</button>";
-    html += "<form method='POST' action='/wifi-forget' style='margin:0;'>";
-    html += "<input type='hidden' name='ssid' value='" + escaped + "'>";
-    html += "<button type='submit' style='width:auto;margin-top:0;padding:.25rem .6rem;'>Forget</button>";
-    html += "</form>";
+    // Not a nested <form>: that is invalid HTML, and the parser drops the inner
+    // <form> tag but honours its </form>, which silently closed the enclosing
+    // settings form and left Save / "Save and continue" outside any form.
+    html += "<button type='submit' formmethod='post' formaction='/wifi-forget' formnovalidate name='ssid' value='" + escaped + "' style='width:auto;margin-top:0;padding:.25rem .6rem;'>Forget</button>";
     html += "</div>";
   }
   html += "</div>";
@@ -286,6 +318,7 @@ static String renderWizardPage() {
 
 #endif
   html += "<div class='box'><h3>Printer</h3>";
+  html += adminPasswordFieldHtml();
   html += "<label>Printer name<input name='printerName' value='" + htmlEscape(cfg.printerName) + "'></label>";
   html += "<small>Becomes the MQTT topic (/&lt;printer name&gt;/status/, /&lt;printer name&gt;/command/), so it must be unique per bridge.</small>";
   html += printerTypeFieldHtml();
@@ -365,6 +398,7 @@ static String renderConfigPage() {
   html += "<label>SSID<input name='wifiSsid' value='" + htmlEscape(cfg.wifiSsid) + "'></label>";
   html += wifiScanWidgetHtml();
   html += "<label>Password<input type='password' name='wifiPassword' value='" + htmlEscape(cfg.wifiPassword) + "'></label>";
+  html += adminPasswordFieldHtml();
   html += "<label>Printer name<input name='printerName' value='" + htmlEscape(cfg.printerName) + "'></label>";
   html += "<small>Type: <code>" + cfg.printerProtocol + "</code> · transport: <code>";
   html += targetMethodName();
@@ -460,7 +494,7 @@ static String renderConfigPage() {
   html += "</div>";
   html += "</div>";
 
-  html += "<button type='submit'>Save and reconnect</button>";
+  html += "<button type='submit'>Save</button>";
   html += "</form>";
 
   html += "<form method='POST' action='/test'><button type='submit'>Send test print</button></form>";
@@ -614,6 +648,7 @@ static void applyServerFormFields() {
 // from a page that doesn't render them yet. Two handlers, each unconditionally
 // parsing only its own page's known fields, avoids that trap.
 static void handleWizardSave() {
+  applyAdminPasswordFields();
   cfg.wifiSsid = web.arg("wifiSsid");
   cfg.wifiPassword = web.arg("wifiPassword");
   rememberWifiNetwork(cfg.wifiSsid, cfg.wifiPassword);
@@ -628,7 +663,7 @@ static void handleWizardSave() {
   cfg.mqttPassword = web.arg("mqttPassword");
 #endif
 
-  cfg.printerName = web.arg("printerName");
+  cfg.printerName = web.arg("printerName"); cfg.printerName.trim();
   if (cfg.printerName.isEmpty()) cfg.printerName = "stikka-esp32";
 
   String printerType = web.arg("printerType");
@@ -653,26 +688,29 @@ static void handleWizardSave() {
   dbgPrintln("[config] setup wizard step 1 saved, reconnecting wifi/mqtt", LogLevel::LOG_INFO);
   printRuntimeSettings("setup wizard step 1 saved");
 
-  // See handleSave()'s comment below on why the response is sent before the
-  // network is torn down.
-  web.send(200, "text/plain", "saved; reconnecting wifi and mqtt -- once back on your normal network, browse to this device again to finish setup");
-  web.client().flush();
-  delay(250);
+  const bool alreadyOnNetwork = WiFi.status() == WL_CONNECTED && WiFi.SSID() == cfg.wifiSsid;
+  if (alreadyOnNetwork) {
+    // e.g. the scan's Connect button already joined it: nothing to tear down.
+    web.send(200, "text/html",
+        "<!doctype html><meta http-equiv='refresh' content='2;url=/'><body>Saved. Continuing with step 2&hellip;</body>");
+    web.client().flush();
+    wifiRestartMdns();
+    mqttBridgeReconnect();
+    return;
+  }
 
-  wifiForceDisconnect();
-  wifiDisableFallbackAp();
+  // Keep the fallback AP up: the browser is probably on it, and connectWifi()
+  // drops it by itself once the station connection succeeds.
+  String page = "<!doctype html><meta name='viewport' content='width=device-width,initial-scale=1'><body style='font-family:Arial,sans-serif;max-width:480px;margin:1rem auto;padding:0 1rem;'>";
+  page += "<h2>Saved</h2><p>The device is now connecting to <b>" + htmlEscape(cfg.wifiSsid) + "</b>.</p>";
+  page += "<p>Once it has joined, reconnect your computer or phone to that network and open <b>http://" +
+          htmlEscape(sanitizeMdnsHostname(cfg.printerName)) + ".local/</b> (or the IP shown in the serial log) to finish step 2.</p>";
+  page += "<p>If it can't connect, this setup network stays available -- reload <a href='/'>this page</a> to check the credentials.</p></body>";
+  web.send(200, "text/html", page);
+  web.client().flush();
+  wifiRetryNow();
 }
 
-// POST /reconfigure -- the "Printer type" box's handler, letting an
-// already-set-up device switch brand/method later without redoing the whole
-// wizard (and, unlike handleWizardSave(), without touching Wi-Fi/MQTT at
-// all). Always reboots on an actual change rather than live re-initializing
-// the target in place: target.cpp's dispatcher and each *_target.cpp were
-// written assuming targetSetup() runs exactly once per boot (usb_host_target.cpp
-// in particular installs the USB host stack with no teardown path -- calling
-// usbHostTargetSetup() a second time this boot, e.g. after switching away
-// from and back to usb_host, would double-install it). A fresh boot sidesteps
-// that entirely instead of adding per-target teardown just for this button.
 static void handleChangeProtocol() {
   String printerType = web.arg("printerType");
   printerType.toLowerCase();
@@ -717,6 +755,7 @@ static bool otaSucceeded = false;
 static String otaError;
 
 static void handleOtaUpload() {
+  if (!isAuthed()) return;  // the final handler answers 401
   HTTPUpload& upload = web.upload();
   if (upload.status == UPLOAD_FILE_START) {
     otaSucceeded = false;
@@ -774,6 +813,9 @@ static void handleOtaUpdate() {
 }
 
 static void handleSave() {
+  applyAdminPasswordFields();
+  const String oldSsid = cfg.wifiSsid;
+  const String oldPassword = cfg.wifiPassword;
   cfg.wifiSsid = web.arg("wifiSsid");
   cfg.wifiPassword = web.arg("wifiPassword");
   rememberWifiNetwork(cfg.wifiSsid, cfg.wifiPassword);
@@ -791,7 +833,7 @@ static void handleSave() {
   cfg.statusIntervalSec = (uint16_t)parsePort(web.arg("statusIntervalSec"), 30);
   if (cfg.statusIntervalSec < 1) cfg.statusIntervalSec = 1;
   if (cfg.statusIntervalSec > 3600) cfg.statusIntervalSec = 3600;
-  cfg.printerName = web.arg("printerName");
+  cfg.printerName = web.arg("printerName"); cfg.printerName.trim();
   cfg.location = web.arg("location");
   if (cfg.printerMethod == "network") {
     cfg.zplTargetHost = web.arg("zplTargetHost");
@@ -845,17 +887,28 @@ static void handleSave() {
   saveConfig();
   applyDebugOutputSetting(cfg.debugOutput);
   targetSetup();
-  dbgPrintln("[config] settings saved via web UI, reconnecting wifi/mqtt", LogLevel::LOG_INFO);
+  dbgPrintln("[config] settings saved via web UI", LogLevel::LOG_INFO);
   printRuntimeSettings("config saved from web UI");
+
+  const bool wifiChanged = cfg.wifiSsid != oldSsid || cfg.wifiPassword != oldPassword;
+  if (!wifiChanged) {
+    // Wi-Fi untouched: no need to drop the link. Just apply name/broker changes.
+    web.send(200, "text/html",
+        "<!doctype html><meta http-equiv='refresh' content='2;url=/'><body>Saved. Returning to settings&hellip;</body>");
+    web.client().flush();
+    wifiRestartMdns();
+    mqttBridgeReconnect();
+    return;
+  }
 
   // Send the response before tearing down the network. The browser's request
   // often arrived over the ESP32's own fallback AP -- if wifiDisableFallbackAp()
   // (WiFi.softAPdisconnect) runs first, that AP link drops before the HTTP
   // response is ever written to the socket, and the browser hangs forever
   // waiting for a reply that can no longer arrive. The delay after send()
-  // gives the WiFi stack a moment to actually get the response bytes over the
-  // air before the interface goes down.
-  web.send(200, "text/plain", "saved; reconnecting wifi and mqtt");
+  // gives the WiFi stack a moment to actually get the response bytes over the air
+  // before the interface goes down.
+  web.send(200, "text/plain", "saved; reconnecting wifi -- browse to this device again once it is back on the network");
   web.client().flush();
   delay(250);
 
@@ -977,29 +1030,29 @@ static void handleWifiForget() {
 }
 
 void webUiSetup() {
-  web.on("/", HTTP_GET, handleRoot);
+  web.on("/", HTTP_GET, guarded(handleRoot));
   web.on("/generate_204", HTTP_GET, handleCaptivePortalRedirect);
   web.on("/gen_204", HTTP_GET, handleCaptivePortalRedirect);
-  web.on("/hotspot-detect.html", HTTP_GET, handleCaptivePortal);
-  web.on("/connecttest.txt", HTTP_GET, handleCaptivePortal);
-  web.on("/ncsi.txt", HTTP_GET, handleCaptivePortal);
+  web.on("/hotspot-detect.html", HTTP_GET, guarded(handleCaptivePortal));
+  web.on("/connecttest.txt", HTTP_GET, guarded(handleCaptivePortal));
+  web.on("/ncsi.txt", HTTP_GET, guarded(handleCaptivePortal));
   web.on("/fwlink", HTTP_GET, handleCaptivePortalRedirect);
-  web.on("/setup", HTTP_POST, handleWizardSave);
-  web.on("/save", HTTP_POST, handleSave);
-  web.on("/reconfigure", HTTP_POST, handleChangeProtocol);
-  web.on("/firmware", HTTP_GET, handleFirmwarePage);
-  web.on("/update", HTTP_POST, handleOtaUpdate, handleOtaUpload);
-  web.on("/wifi-scan/start", HTTP_POST, handleWifiScanStart);
-  web.on("/wifi-scan/result", HTTP_GET, handleWifiScanResult);
-  web.on("/wifi-scan/connect", HTTP_POST, handleWifiScanConnect);
-  web.on("/wifi-scan/connect-result", HTTP_GET, handleWifiConnectResult);
-  web.on("/wifi-scan/connect-saved", HTTP_POST, handleWifiScanConnectSaved);
-  web.on("/wifi-forget", HTTP_POST, handleWifiForget);
-  web.on("/logs", HTTP_GET, handleLogsPage);
-  web.on("/logs.json", HTTP_GET, handleLogsJson);
-  web.on("/logs/level", HTTP_POST, handleLogsSetLevel);
-  web.on("/logs/clear", HTTP_POST, handleLogsClear);
-  web.on("/test", HTTP_POST, handleTest);
+  web.on("/setup", HTTP_POST, guarded(handleWizardSave));
+  web.on("/save", HTTP_POST, guarded(handleSave));
+  web.on("/reconfigure", HTTP_POST, guarded(handleChangeProtocol));
+  web.on("/firmware", HTTP_GET, guarded(handleFirmwarePage));
+  web.on("/update", HTTP_POST, guarded(handleOtaUpdate), handleOtaUpload);
+  web.on("/wifi-scan/start", HTTP_POST, guarded(handleWifiScanStart));
+  web.on("/wifi-scan/result", HTTP_GET, guarded(handleWifiScanResult));
+  web.on("/wifi-scan/connect", HTTP_POST, guarded(handleWifiScanConnect));
+  web.on("/wifi-scan/connect-result", HTTP_GET, guarded(handleWifiConnectResult));
+  web.on("/wifi-scan/connect-saved", HTTP_POST, guarded(handleWifiScanConnectSaved));
+  web.on("/wifi-forget", HTTP_POST, guarded(handleWifiForget));
+  web.on("/logs", HTTP_GET, guarded(handleLogsPage));
+  web.on("/logs.json", HTTP_GET, guarded(handleLogsJson));
+  web.on("/logs/level", HTTP_POST, guarded(handleLogsSetLevel));
+  web.on("/logs/clear", HTTP_POST, guarded(handleLogsClear));
+  web.on("/test", HTTP_POST, guarded(handleTest));
   web.onNotFound(handleCaptivePortalRedirect);
   web.begin();
 }

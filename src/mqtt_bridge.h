@@ -28,3 +28,8 @@ void mqttBridgeSetup();
 void mqttBridgeLoop();
 
 void publishStatus(const char* phase = "ready", const char* lastError = "");
+
+// Applies changed name/broker settings without touching Wi-Fi: drops the
+// current MQTT connection (it re-establishes within a few seconds with the new
+// client id/topics), or in the server build just pushes a fresh status.
+void mqttBridgeReconnect();

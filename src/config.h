@@ -76,6 +76,9 @@ struct AppConfig {
   String serverNodeSecret;
   String serverWsUrl;
   uint16_t statusIntervalSec = 30;
+  // HTTP Basic auth password for the web UI (user "admin"). Empty = no
+  // protection (fresh device, so first-boot setup works without credentials).
+  String adminPassword;
   String printerName = "stikka-esp32";
   String location; // optional, freeform (e.g. "Front desk") -- shown in the frontend next to the serial
   // Chosen at runtime via the web UI's first-boot setup wizard (see

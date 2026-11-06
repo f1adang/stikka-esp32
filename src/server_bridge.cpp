@@ -474,7 +474,12 @@ static void onMessage(const char* text, size_t len) {
 
   if (type == "welcome" || type == "config.set") {
     const String name = doc["name"] | "";
-    if (!name.isEmpty() && name != cfg.printerName) {
+    // "welcome" is sent on every (re)connect and carries the server's stored
+    // name, which would silently revert a name just edited in the local web UI
+    // (the save triggers a reconnect). Only an explicit "config.set" from the
+    // server overrides a name that is already set locally.
+    const bool adopt = type == "config.set" || cfg.printerName.isEmpty() || cfg.printerName == "stikka-esp32";
+    if (adopt && !name.isEmpty() && name != cfg.printerName) {
       dbgPrintln("[server] name is now \"" + name + "\"", LogLevel::LOG_INFO);
       cfg.printerName = name;
       saveConfig();
@@ -554,6 +559,8 @@ static void startWs() {
 }
 
 // ───────────────────────── entry points ─────────────────────────
+
+void mqttBridgeReconnect() { statusDirty = true; }
 
 void mqttBridgeSetup() {
   // Everything happens lazily in the loop once Wi-Fi is up.

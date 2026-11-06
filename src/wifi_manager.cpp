@@ -15,6 +15,11 @@ static bool apModeActive = false;
 static bool mdnsActive = false;
 static String mdnsHostname;
 static unsigned long lastWifiAttemptMs = 0;
+// While a manual scan is in progress (or just failed), station connect retries
+// are held off: a pending WiFi.begin() keeps the radio busy and makes
+// scanNetworks() fail or return nothing.
+static unsigned long scanHoldUntilMs = 0;
+static int scanRetriesLeft = 0;
 static unsigned long wifiDisconnectedSinceMs = 0;
 static int lastWifiStatus = -1;
 static bool lastApModeState = false;
@@ -54,7 +59,7 @@ String wifiFallbackApSsid() {
 // trailing hyphen. cfg.printerName is freeform user text (default
 // "stikka-esp32", but web-UI-editable to anything), so it needs sanitizing
 // before use here rather than assuming it's already a valid label.
-static String sanitizeMdnsHostname(const String& raw) {
+String sanitizeMdnsHostname(const String& raw) {
   String out;
   out.reserve(raw.length());
   for (size_t i = 0; i < raw.length(); i++) {
@@ -103,6 +108,10 @@ static void startMdns() {
   dbgPrint("[mdns] responder started, browse to http://");
   dbgPrint(hostname);
   dbgPrintln(".local/", LogLevel::LOG_ERROR);
+}
+
+void wifiRestartMdns() {
+  if (WiFi.status() == WL_CONNECTED) startMdns();
 }
 
 static void ensureFallbackAp() {
@@ -187,15 +196,25 @@ static void connectWifi() {
     ensureFallbackAp();
   }
 
+  if (scanHoldUntilMs != 0 && (long)(scanHoldUntilMs - now) > 0) return;
   if (now - lastWifiAttemptMs < WIFI_RETRY_EVERY_MS) return;
   lastWifiAttemptMs = now;
 
   WiFi.begin(cfg.wifiSsid.c_str(), cfg.wifiPassword.c_str());
 }
 
+void wifiRetryNow() {
+  wifiDisconnectedSinceMs = 0;
+  lastWifiAttemptMs = 0;
+  scanHoldUntilMs = 0;
+}
+
 void wifiForceDisconnect() {
   WiFi.disconnect(true);
   wifiDisconnectedSinceMs = millis();
+  // Let connectWifi() call WiFi.begin() on the next loop() instead of waiting
+  // out the retry throttle, so "Save and reconnect" reconnects right away.
+  lastWifiAttemptMs = 0;
 }
 
 void printNetworkState(const char* reason) {
@@ -245,6 +264,8 @@ void printNetworkState(const char* reason) {
 void wifiStartScan() {
   if (WiFi.scanComplete() == WIFI_SCAN_RUNNING) return;
   WiFi.scanDelete();
+  scanRetriesLeft = 2;
+  scanHoldUntilMs = millis() + 20000;
   // Active scan (default), but with a longer per-channel dwell
   // (max_ms_per_chan) than the library default of 300ms -- 300ms only
   // reliably catches whichever APs happen to answer a probe request
@@ -267,12 +288,20 @@ String wifiScanResultJson() {
 
   if (n == WIFI_SCAN_RUNNING) {
     doc["status"] = "scanning";
+  } else if (n == WIFI_SCAN_FAILED && scanRetriesLeft > 0) {
+    // Transient failure (radio busy): retry transparently.
+    scanRetriesLeft--;
+    WiFi.scanDelete();
+    WiFi.scanNetworks(true, false, false, 600);
+    doc["status"] = "scanning";
   } else if (n == WIFI_SCAN_FAILED) {
+    scanHoldUntilMs = 0;
     doc["status"] = "failed";
   } else if (n < 0) {
     doc["status"] = "idle";
   } else {
     doc["status"] = "done";
+    scanHoldUntilMs = 0;
     JsonArray arr = doc["networks"].to<JsonArray>();
     // n is small (real-world scans rarely exceed a few dozen APs), so this
     // repeated linear scan to pick strongest-first while skipping

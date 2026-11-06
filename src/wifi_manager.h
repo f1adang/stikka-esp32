@@ -20,11 +20,21 @@ const char* wifiApPassword();
 // startMdns()/wifiManagerLoop() in wifi_manager.cpp.
 String wifiMdnsHostname();
 
+// Hostname (without ".local") that cfg.printerName maps to.
+String sanitizeMdnsHostname(const String& raw);
+
 // Torn down explicitly (rather than left to the next wifiManagerLoop()
 // retry) when the web UI saves new Wi-Fi/MQTT settings, so the old
 // connection doesn't linger with stale credentials.
 void wifiDisableFallbackAp();
 void wifiForceDisconnect();
+
+// Makes the next loop() call WiFi.begin() with the current cfg credentials
+// without tearing down the radio or the fallback AP.
+void wifiRetryNow();
+
+// Re-registers the mDNS hostname from cfg.printerName (no-op if not connected).
+void wifiRestartMdns();
 
 void printNetworkState(const char* reason);
 

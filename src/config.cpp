@@ -51,6 +51,7 @@ void loadConfig() {
   cfg.serverWsUrl = prefs.getString("srvWsUrl", "");
   cfg.statusIntervalSec = prefs.getUShort("statInt", 30);
   cfg.printerName = prefs.getString("printer", "stikka-esp32");
+  cfg.adminPassword = prefs.getString("adminPwd", "");
   cfg.location = prefs.getString("location", "");
   cfg.printerProtocol = prefs.getString("printProto", "");
   cfg.printerMethod = prefs.getString("printMeth", "");
@@ -105,6 +106,7 @@ void saveConfig() {
   prefs.putString("srvWsUrl", cfg.serverWsUrl);
   prefs.putUShort("statInt", cfg.statusIntervalSec);
   prefs.putString("printer", cfg.printerName);
+  prefs.putString("adminPwd", cfg.adminPassword);
   prefs.putString("location", cfg.location);
   prefs.putString("printProto", cfg.printerProtocol);
   prefs.putString("printMeth", cfg.printerMethod);

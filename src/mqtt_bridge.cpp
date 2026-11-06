@@ -645,6 +645,11 @@ void mqttBridgeLoop() {
   }
 }
 
+void mqttBridgeReconnect() {
+  if (activeMqtt && !activeMqtt->disconnected()) activeMqtt->disconnect();
+  lastMqttAttemptMs = 0;
+}
+
 void mqttBridgeSetup() {
   mqttPlain.onConnect(onMqttConnect);
   mqttPlain.onDisconnect(onMqttDisconnect);
