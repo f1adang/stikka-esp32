@@ -67,6 +67,14 @@ struct AppConfig {
   String mqttCaCert;
   String mqttUser = DEFAULT_MQTT_USER;
   String mqttPassword = DEFAULT_MQTT_PASSWORD;
+  // stikka-server build only (-D STIKKA_SERVER, see platformio.ini): the
+  // server base URL, a one-time pairing code (cleared once enrollment
+  // succeeds or is rejected) and the credentials the server issued in return.
+  String serverUrl;
+  String serverPairingCode;
+  String serverNodeId;
+  String serverNodeSecret;
+  String serverWsUrl;
   uint16_t statusIntervalSec = 30;
   String printerName = "stikka-esp32";
   String location; // optional, freeform (e.g. "Front desk") -- shown in the frontend next to the serial

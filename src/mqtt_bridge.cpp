@@ -1,3 +1,4 @@
+#ifndef STIKKA_SERVER  // replaced by server_bridge.cpp in the stikka-server build
 #include "mqtt_bridge.h"
 
 #include <ArduinoJson.h>
@@ -652,3 +653,5 @@ void mqttBridgeSetup() {
   mqttSecure.onDisconnect(onMqttDisconnect);
   mqttSecure.onMessage(onMqttMessage);
 }
+
+#endif  // !STIKKA_SERVER

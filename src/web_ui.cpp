@@ -262,6 +262,14 @@ static String renderWizardPage() {
   html += "<label>Password<input type='password' name='wifiPassword' value='" + htmlEscape(cfg.wifiPassword) + "'></label>";
   html += "</div>";
 
+#ifdef STIKKA_SERVER
+  html += "<div class='box'><h3>stikka-server</h3>";
+  html += "<label>Server URL<input name='serverUrl' placeholder='https://stikka.example.com' value='" + htmlEscape(cfg.serverUrl) + "'></label>";
+  html += "<label>Pairing code<input name='serverPairingCode' placeholder='K7Q-4MZ' autocomplete='off'></label>";
+  html += "<small>Get a one-time code from the server's web app (Add printer). Codes work once and expire after 15 minutes.</small>";
+  html += "</div>";
+
+#else
   html += "<div class='box'><h3>MQTT broker</h3>";
   html += "<label>Broker host<input name='mqttHost' value='" + htmlEscape(cfg.mqttHost) + "'></label>";
   html += "<label>Broker port<input name='mqttPort' value='" + String(cfg.mqttPort) + "'></label>";
@@ -276,6 +284,7 @@ static String renderWizardPage() {
   html += "<small>Host only (no ws:// or wss://). Example: your-cluster.s2.eu.hivemq.cloud</small>";
   html += "</div>";
 
+#endif
   html += "<div class='box'><h3>Printer</h3>";
   html += "<label>Printer name<input name='printerName' value='" + htmlEscape(cfg.printerName) + "'></label>";
   html += "<small>Becomes the MQTT topic (/&lt;printer name&gt;/status/, /&lt;printer name&gt;/command/), so it must be unique per bridge.</small>";
@@ -316,8 +325,13 @@ static String renderConfigPage() {
       html += " -- <a href='http://" + mdnsHostname + ".local/'>" + mdnsHostname + ".local</a>";
     }
   }
+#ifdef STIKKA_SERVER
+  html += "<br>Server: ";
+  html += htmlEscape(serverBridgeStatus());
+#else
   html += "<br>MQTT: ";
   html += mqttIsConnected() ? "connected" : "disconnected";
+#endif
   html += "<br>Fallback AP: ";
   if (wifiApModeActive()) {
     html += "active (SSID: <code>" + wifiFallbackApSsid() + "</code>, password: <code>" + String(wifiApPassword()) + "</code>)";
@@ -325,8 +339,10 @@ static String renderConfigPage() {
   } else {
     html += "inactive";
   }
+#ifndef STIKKA_SERVER
   html += "<br>Command topic: <code>" + commandTopic() + "</code>";
   html += "<br>Status topic: <code>" + statusTopic() + "</code>";
+#endif
   html += "</div>";
 
   // Deliberately its own <form>/box, outside the /save form above rather
@@ -357,6 +373,15 @@ static String renderConfigPage() {
   html += "<small>Shown in the frontend next to this printer's serial number.</small>";
   html += "</div>";
 
+#ifdef STIKKA_SERVER
+  html += "<div class='box'><h3>stikka-server</h3>";
+  html += "<label>Server URL<input name='serverUrl' placeholder='https://stikka.example.com' value='" + htmlEscape(cfg.serverUrl) + "'></label>";
+  html += "<label>New pairing code (only to pair or re-pair)<input name='serverPairingCode' placeholder='K7Q-4MZ' autocomplete='off'></label>";
+  html += "<small>Status: " + htmlEscape(serverBridgeStatus()) + "</small>";
+  html += "<label>Status publish interval (seconds, max 60)<input name='statusIntervalSec' value='" + String(cfg.statusIntervalSec) + "'></label>";
+  html += "</div>\n\n";
+
+#else
   html += "<div class='box'><h3>MQTT</h3>";
   html += "<label>Broker host<input name='mqttHost' value='" + htmlEscape(cfg.mqttHost) + "'></label>";
   html += "<label>Broker port<input name='mqttPort' value='" + String(cfg.mqttPort) + "'></label>";
@@ -373,6 +398,7 @@ static String renderConfigPage() {
   html += "<small>Host only (no ws:// or wss://). Example: your-cluster.s2.eu.hivemq.cloud</small>";
   html += "</div>";
 
+#endif
   if (cfg.printerMethod == "network") {
     html += "<div class='box'><h3>Network target</h3>";
     html += "<label>Target host<input name='zplTargetHost' value='" + htmlEscape(cfg.zplTargetHost) + "'></label>";
@@ -557,6 +583,28 @@ static void handleCaptivePortalRedirect() {
   web.send(404, "text/plain", "not found");
 }
 
+#ifdef STIKKA_SERVER
+// Shared by the wizard and the full settings form. A new server URL or a
+// non-empty pairing code makes the bridge (re-)enroll; leaving the code
+// empty keeps the stored node credentials untouched.
+static void applyServerFormFields() {
+  String url = web.arg("serverUrl");
+  url.trim();
+  while (url.endsWith("/")) url.remove(url.length() - 1);
+  if (!url.isEmpty() && url.indexOf("://") < 0) url = "https://" + url;
+  if (url != cfg.serverUrl && !cfg.serverNodeId.isEmpty()) {
+    // Credentials belong to the old server.
+    cfg.serverNodeId = "";
+    cfg.serverNodeSecret = "";
+    cfg.serverWsUrl = "";
+  }
+  cfg.serverUrl = url;
+  String code = web.arg("serverPairingCode");
+  code.trim();
+  if (!code.isEmpty()) cfg.serverPairingCode = code;
+}
+#endif
+
 // POST /setup -- the first-boot wizard's only handler. Deliberately separate
 // from handleSave() rather than one "smart" handler for both forms: Arduino
 // WebServer's web.hasArg("checkbox") is indistinguishable between "unchecked"
@@ -569,12 +617,16 @@ static void handleWizardSave() {
   cfg.wifiSsid = web.arg("wifiSsid");
   cfg.wifiPassword = web.arg("wifiPassword");
   rememberWifiNetwork(cfg.wifiSsid, cfg.wifiPassword);
+#ifdef STIKKA_SERVER
+  applyServerFormFields();
+#else
   cfg.mqttHost = normalizeMqttHost(web.arg("mqttHost"));
   cfg.mqttPort = parsePort(web.arg("mqttPort"), 1883);
   cfg.mqttUseTls = web.hasArg("mqttUseTls");
   cfg.mqttTlsInsecure = web.hasArg("mqttTlsInsecure");
   cfg.mqttUser = web.arg("mqttUser");
   cfg.mqttPassword = web.arg("mqttPassword");
+#endif
 
   cfg.printerName = web.arg("printerName");
   if (cfg.printerName.isEmpty()) cfg.printerName = "stikka-esp32";
@@ -725,6 +777,9 @@ static void handleSave() {
   cfg.wifiSsid = web.arg("wifiSsid");
   cfg.wifiPassword = web.arg("wifiPassword");
   rememberWifiNetwork(cfg.wifiSsid, cfg.wifiPassword);
+#ifdef STIKKA_SERVER
+  applyServerFormFields();
+#else
   cfg.mqttHost = normalizeMqttHost(web.arg("mqttHost"));
   cfg.mqttPort = parsePort(web.arg("mqttPort"), 1883);
   cfg.mqttUseTls = web.hasArg("mqttUseTls");
@@ -732,6 +787,7 @@ static void handleSave() {
   cfg.mqttCaCert = web.arg("mqttCaCert");
   cfg.mqttUser = web.arg("mqttUser");
   cfg.mqttPassword = web.arg("mqttPassword");
+#endif
   cfg.statusIntervalSec = (uint16_t)parsePort(web.arg("statusIntervalSec"), 30);
   if (cfg.statusIntervalSec < 1) cfg.statusIntervalSec = 1;
   if (cfg.statusIntervalSec > 3600) cfg.statusIntervalSec = 3600;

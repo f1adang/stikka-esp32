@@ -44,6 +44,11 @@ void loadConfig() {
   cfg.mqttCaCert = prefs.getString("mqttCa", "");
   cfg.mqttUser = prefs.getString("mqttUser", DEFAULT_MQTT_USER);
   cfg.mqttPassword = prefs.getString("mqttPwd", DEFAULT_MQTT_PASSWORD);
+  cfg.serverUrl = prefs.getString("srvUrl", "");
+  cfg.serverPairingCode = prefs.getString("srvCode", "");
+  cfg.serverNodeId = prefs.getString("srvNodeId", "");
+  cfg.serverNodeSecret = prefs.getString("srvSecret", "");
+  cfg.serverWsUrl = prefs.getString("srvWsUrl", "");
   cfg.statusIntervalSec = prefs.getUShort("statInt", 30);
   cfg.printerName = prefs.getString("printer", "stikka-esp32");
   cfg.location = prefs.getString("location", "");
@@ -93,6 +98,11 @@ void saveConfig() {
   prefs.putString("mqttCa", cfg.mqttCaCert);
   prefs.putString("mqttUser", cfg.mqttUser);
   prefs.putString("mqttPwd", cfg.mqttPassword);
+  prefs.putString("srvUrl", cfg.serverUrl);
+  prefs.putString("srvCode", cfg.serverPairingCode);
+  prefs.putString("srvNodeId", cfg.serverNodeId);
+  prefs.putString("srvSecret", cfg.serverNodeSecret);
+  prefs.putString("srvWsUrl", cfg.serverWsUrl);
   prefs.putUShort("statInt", cfg.statusIntervalSec);
   prefs.putString("printer", cfg.printerName);
   prefs.putString("location", cfg.location);
@@ -228,6 +238,14 @@ void printRuntimeSettings(const char* reason) {
   dbgPrint(cfg.savedWifiNetworkCount);
   dbgPrint("/");
   dbgPrintln(MAX_SAVED_WIFI_NETWORKS);
+#ifdef STIKKA_SERVER
+  dbgPrint("Server: ");
+  dbgPrintln(cfg.serverUrl.isEmpty() ? String("<not configured>") : cfg.serverUrl);
+  dbgPrint("Node id: ");
+  dbgPrintln(cfg.serverNodeId.isEmpty() ? String("<not paired>") : cfg.serverNodeId);
+  dbgPrint("Pairing code pending: ");
+  dbgPrintln(cfg.serverPairingCode.isEmpty() ? "no" : "yes");
+#else
   dbgPrint("MQTT broker: ");
   if (cfg.mqttHost.isEmpty()) {
     dbgPrintln("<not configured>");
@@ -248,6 +266,7 @@ void printRuntimeSettings(const char* reason) {
   dbgPrintln(commandTopic());
   dbgPrint("Status topic: ");
   dbgPrintln(statusTopic());
+#endif
   dbgPrint("Debug output: ");
   dbgPrintln(cfg.debugOutput ? "enabled" : "disabled");
   dbgPrintln("========================================================");
